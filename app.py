@@ -12,7 +12,7 @@ from fastapi.responses import Response, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from config import UPLOAD_DIR, DIST_DIR, MAX_PHOTOS, MAX_PHOTO_BYTES
+from config import UPLOAD_DIR, DIST_DIR, MAX_PHOTOS, MAX_PHOTO_BYTES, SEED_FILE
 from db import get_conn, init_db
 
 app = FastAPI(title="Vishenka Store API")
@@ -134,20 +134,41 @@ def build_reports(sales):
 
 
 # ---------------------------------------------------------------- PUBLIC
+def seed_catalog():
+    """Данные из таблицы сестры — запасной режим, если база недоступна."""
+    seed = json.loads(SEED_FILE.read_text(encoding="utf-8"))
+    return [{"id": i + 1, "name": p["name"], "code": "", "category": p["category"],
+             "purchase_price": p["purchase_price"], "sale_price": p["sale_price"],
+             "quantity": p["quantity"], "markup": round((p["sale_price"] / p["purchase_price"] - 1) * 100, 1)
+             if p["purchase_price"] else 0,
+             "purchase_total": p["purchase_price"] * p["quantity"],
+             "sale_total": p["sale_price"] * p["quantity"],
+             "status": "published", "created_at": "", "photos": []}
+            for i, p in enumerate(seed.get("products", []))]
+
+
 @app.get("/api/catalog")
 def catalog():
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT * FROM products WHERE status = 'published' ORDER BY id DESC")
-            rows = cur.fetchall()
-            return {"products": [product_out(r, photos_for(cur, r["id"])) for r in rows]}
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM products WHERE status = 'published' ORDER BY id DESC")
+                rows = cur.fetchall()
+                return {"products": [product_out(r, photos_for(cur, r["id"])) for r in rows]}
+    except Exception as exc:
+        print("catalog fallback:", exc)
+        return {"products": seed_catalog()}
 
 
 @app.get("/api/meta")
 def meta():
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            categories = json.loads(get_setting(cur, "categories", "[]"))
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                categories = json.loads(get_setting(cur, "categories", "[]"))
+    except Exception:
+        seed = json.loads(SEED_FILE.read_text(encoding="utf-8"))
+        categories = seed.get("categories", [])
     return {"categories": categories, "currency": "сом", "store_name": "Vishenka Store"}
 
 

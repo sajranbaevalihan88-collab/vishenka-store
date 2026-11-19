@@ -7,3 +7,5 @@ data/
 .env
 .vercel
 *.log
+
+.vercel
