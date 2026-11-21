@@ -536,39 +536,152 @@ function StatsPanel({ stats }) {
   const d = stats?.[period] || { sold: 0, deals: 0, revenue: 0, cost: 0, profit: 0, by_payment: {} };
   const label = PERIODS.find((p) => p.key === period)?.label;
   const bp = d.by_payment || {};
+  const marginPct = d.revenue > 0 ? Math.round((d.profit / d.revenue) * 100) : 0;
+  const avgCheck = d.deals > 0 ? Math.round(d.revenue / d.deals) : 0;
 
   return (
     <div className="panel period-panel">
       <div className="period-head">
         <div>
-          <h3>Статистика продаж</h3>
-          <p className="sub">Обновляется после каждой оплаты на кассе</p>
+          <h3>Итоги продаж · {label}</h3>
+          <p className="sub">Сколько продано, какая выручка и чистая прибыль за вычетом закупки</p>
         </div>
-        <span className="live"><span className="pulse-dot" /> Live</span>
+        <div className="period-tabs">
+          {PERIODS.map((p) => (
+            <button key={p.key} className={period === p.key ? 'active' : ''} onClick={() => setPeriod(p.key)}>
+              {p.label}
+            </button>
+          ))}
+        </div>
       </div>
-      <div className="period-tabs">
-        {PERIODS.map((p) => (
-          <button key={p.key} className={period === p.key ? 'active' : ''} onClick={() => setPeriod(p.key)}>
-            {p.label}
-          </button>
-        ))}
-      </div>
-      <div className="period-caption">Период: <b>{label}</b></div>
+
       <div className="period-grid">
-        <div className="metric"><div className="m-l">Продано вещей</div><div className="m-v num">{num(d.sold)} шт</div></div>
-        <div className="metric"><div className="m-l">Выручка</div><div className="m-v num">{money(d.revenue)}</div></div>
-        <div className="metric"><div className="m-l">Себестоимость</div><div className="m-v num">{money(d.cost)}</div></div>
-        <div className="metric profit"><div className="m-l">Чистая прибыль</div><div className="m-v num">{money(d.profit)}</div></div>
+        <div className="metric revenue">
+          <div className="m-l">Выручка</div>
+          <div className="m-v num">{money(d.revenue)}</div>
+          <div className="m-sub">{num(d.deals)} чеков · {num(d.sold)} вещей</div>
+        </div>
+        <div className="metric profit">
+          <div className="m-l">Чистая прибыль</div>
+          <div className="m-v num">{money(d.profit)}</div>
+          <div className="m-sub">{d.revenue > 0 ? `Маржа ${marginPct}% от выручки` : 'После первой продажи'}</div>
+        </div>
+        <div className="metric">
+          <div className="m-l">Себестоимость</div>
+          <div className="m-v num">{money(d.cost)}</div>
+          <div className="m-sub">Закупка проданных вещей</div>
+        </div>
+        <div className="metric">
+          <div className="m-l">Средний чек</div>
+          <div className="m-v num">{money(avgCheck)}</div>
+          <div className="m-sub">В среднем на 1 покупателя</div>
+        </div>
       </div>
+
       <div className="period-foot">
-        <span>Чеков: <b className="num">{num(d.deals)}</b></span>
+        <span className="pf-label">Оплата по способам:</span>
         <span className="pay-breakdown num">
-          <span>Наличные: <b>{money(bp.cash || 0)}</b></span>
-          <span>QR / Перевод: <b>{money(bp.qr || 0)}</b></span>
-          <span>Карта: <b>{money(bp.card || 0)}</b></span>
-          {(bp.mixed || 0) > 0 && <span>Смешанная: <b>{money(bp.mixed)}</b></span>}
+          <span className="pill pay-cash">Наличные: <b>{money(bp.cash || 0)}</b></span>
+          <span className="pill pay-qr">QR / Перевод: <b>{money(bp.qr || 0)}</b></span>
+          <span className="pill pay-card">Карта: <b>{money(bp.card || 0)}</b></span>
+          {(bp.mixed || 0) > 0 && <span className="pill pay-mixed">Смешанная: <b>{money(bp.mixed)}</b></span>}
         </span>
       </div>
+    </div>
+  );
+}
+
+/* ============================ Bar Chart (7 дней / Месяцы) ============================ */
+function SalesBarChart({ sales, months }) {
+  const [mode, setMode] = useState('days');
+
+  const bars = (() => {
+    if (mode === 'months') {
+      return (months || []).slice().reverse().map((m) => ({
+        key: m.month,
+        label: shortMonth(m.month),
+        revenue: Number(m.revenue || 0),
+        profit: Number(m.profit || 0),
+        sold: Number(m.sold || 0),
+      }));
+    }
+    const days = [];
+    const now = new Date();
+    for (let i = 6; i >= 0; i--) {
+      const dt = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
+      const iso = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+      const label = i === 0 ? 'Сегодня' : i === 1 ? 'Вчера' : `${dt.getDate()} ${SHORT[dt.getMonth()].toLowerCase()}`;
+      days.push({ key: iso, label, revenue: 0, profit: 0, sold: 0 });
+    }
+    const byDay = Object.fromEntries(days.map((d) => [d.key, d]));
+    for (const s of sales || []) {
+      const iso = String(s.sale_date || '').slice(0, 10);
+      const bucket = byDay[iso];
+      if (!bucket) continue;
+      const q = Number(s.quantity || 0);
+      const rev = Math.max(0, q * Number(s.unit_price || 0) - Number(s.discount || 0));
+      const cost = q * Number(s.unit_cost || 0);
+      bucket.revenue += rev;
+      bucket.profit += rev - cost;
+      bucket.sold += q;
+    }
+    return days;
+  })();
+
+  const hasData = bars.some((b) => b.revenue > 0);
+  const maxVal = Math.max(...bars.map((b) => Math.max(b.revenue, b.profit, 0)), 1);
+  const fmtShort = (n) => (n >= 1000 ? `${(n / 1000).toFixed(n % 1000 === 0 ? 0 : 1).replace('.', ',')}к` : String(Math.round(n)));
+
+  return (
+    <div className="panel chart-panel">
+      <div className="bar-chart-head">
+        <div>
+          <h3>График продаж</h3>
+          <p className="sub">Сравнение выручки и чистой прибыли ({mode === 'days' ? 'последние 7 дней' : 'по месяцам'})</p>
+        </div>
+        <div className="bar-chart-tools">
+          <div className="disc-pills">
+            <button type="button" className={mode === 'days' ? 'active' : ''} onClick={() => setMode('days')}>7 дней</button>
+            <button type="button" className={mode === 'months' ? 'active' : ''} onClick={() => setMode('months')}>Месяцы</button>
+          </div>
+        </div>
+      </div>
+
+      <div className="bar-legend">
+        <span><i className="leg-dot rev" /> Выручка</span>
+        <span><i className="leg-dot prof" /> Прибыль</span>
+      </div>
+
+      {!hasData ? (
+        <div className="chart-empty">
+          Пока нет продаж за этот период — пробейте первый чек на кассе, и здесь появятся столбцы выручки и прибыли.
+        </div>
+      ) : (
+        <div className="bar-chart-area">
+          <div className="bar-cols">
+            {bars.map((b) => {
+              const revH = b.revenue > 0 ? Math.max(8, Math.round((b.revenue / maxVal) * 100)) : 0;
+              const profH = b.profit > 0 ? Math.max(6, Math.round((b.profit / maxVal) * 100)) : 0;
+              return (
+                <div
+                  className="bar-group"
+                  key={b.key}
+                  title={`${b.label}: выручка ${money(b.revenue)}, прибыль ${money(b.profit)}, продано ${b.sold} шт`}
+                >
+                  <div className="bar-val num">
+                    {b.revenue > 0 ? fmtShort(b.revenue) : ''}
+                  </div>
+                  <div className="bar-pair">
+                    <div className="bar-col rev" style={{ height: `${revH}%` }} />
+                    <div className="bar-col prof" style={{ height: `${profH}%` }} />
+                  </div>
+                  <div className="bar-lbl">{b.label}</div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -687,33 +800,6 @@ function Admin({
       setSavingSettings(false);
     }
   };
-
-  const months = (dash.months || []).slice().reverse();
-  let chart = <p style={{ color: 'var(--muted)', fontSize: 12, textAlign: 'center', padding: '60px 0' }}>Пока нет продаж — пробейте первый чек на кассе</p>;
-  if (months.length && months.some((m) => m.revenue > 0)) {
-    const max = Math.max(...months.map((m) => m.revenue)) || 1, W = 520, H = 170, step = W / months.length;
-    const pts = months.map((m, i) => [i * step + step / 2, H - (m.revenue / max) * (H - 24)]);
-    const line = pts.map((p) => p.join(',')).join(' ');
-    const area = `M${pts[0][0]},${H} L${pts.map((p) => p.join(',')).join(' L')} L${pts[pts.length - 1][0]},${H} Z`;
-    chart = (
-      <svg viewBox={`0 0 ${W} ${H + 26}`} preserveAspectRatio="none">
-        <defs>
-          <linearGradient id="ag" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0" stopColor="#7a1326" stopOpacity=".24" />
-            <stop offset="1" stopColor="#7a1326" stopOpacity="0" />
-          </linearGradient>
-        </defs>
-        <path d={area} fill="url(#ag)" />
-        <polyline points={line} fill="none" stroke="#7a1326" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
-        {pts.map((p, i) => (
-          <g key={i}>
-            <circle cx={p[0]} cy={p[1]} r="3.8" fill="#fff" stroke="#7a1326" strokeWidth="2.2" />
-            <text x={p[0]} y={H + 20} textAnchor="middle" fontSize="10" fill="#7a6468">{shortMonth(months[i].month)}</text>
-          </g>
-        ))}
-      </svg>
-    );
-  }
 
   const filtered = products.filter((p) => {
     const q = productSearch.trim().toLowerCase();
@@ -877,34 +963,54 @@ function Admin({
 
           {tab === 'overview' && (
             <section className="tab active">
-              <StatsPanel stats={stats} />
-              <div className="stats">
-                <Stat Icon={IconHanger} label="Товаров в базе" value={num(dash.total_products)} foot={`${dash.published || 0} на витрине · ${dash.drafts || 0} черновиков`} />
-                <Stat Icon={IconBox} label="Остаток на складе" value={num(dash.stock) + ' шт'} foot={money(dash.stock_cost) + ' по закупке'} tone="a" />
-                <Stat Icon={IconCash} label="Стоимость остатка" value={money(dash.stock_sale)} foot="по ценам продажи" />
-                <Stat Icon={IconTrend} label="Сегодня продано" value={num(stats?.today?.sold) + ' шт'} foot={money(stats?.today?.revenue)} tone="g" />
+              <div className="overview-actions">
+                <button className="btn btn-primary" onClick={() => setTab('pos')}>
+                  <IconPos size={15} /> Открыть кассу
+                </button>
+                <button className="btn btn-ghost" onClick={() => setModal({ product: null })}>
+                  <IconPlus size={15} /> Добавить товар
+                </button>
+                <button className="btn btn-ghost" onClick={() => setTab('products')}>
+                  <IconBarcode size={15} /> Товары и бирки
+                </button>
               </div>
+
+              <StatsPanel stats={stats} />
+
+              <div className="stats stats-3">
+                <Stat Icon={IconHanger} label="Товаров в каталоге" value={num(dash.total_products)} foot={`${dash.published || 0} на витрине · ${dash.drafts || 0} черновиков`} />
+                <Stat Icon={IconBox} label="Остаток на складе" value={num(dash.stock) + ' шт'} foot={'Закупка: ' + money(dash.stock_cost)} tone="a" />
+                <Stat Icon={IconCash} label="Ожидаемая выручка" value={money(dash.stock_sale)} foot="Если продать весь текущий остаток" tone="g" />
+              </div>
+
               <div className="cols">
+                <SalesBarChart sales={sales} months={dash.months || []} />
                 <div className="panel">
-                  <h3>Выручка по месяцам</h3>
-                  <p className="sub">Динамика продаж, сом</p>
-                  <div className="chart">{chart}</div>
-                </div>
-                <div className="panel">
-                  <h3>Заканчивается</h3>
-                  <p className="sub">Остаток 3 шт или меньше</p>
+                  <h3>Заканчивается на складе</h3>
+                  <p className="sub">Нажмите на товар, чтобы пополнить остаток</p>
                   {(dash.low_stock || []).length ? (
-                    dash.low_stock.map((p) => (
-                      <div className="mini-row" key={p.id}>
-                        <span>{p.name}</span>
-                        <span className={'pill ' + (p.quantity <= 0 ? 'out' : 'low')}>{p.quantity} шт</span>
-                      </div>
-                    ))
+                    dash.low_stock.map((p) => {
+                      const full = products.find((x) => x.id === p.id);
+                      return (
+                        <button
+                          type="button"
+                          className="mini-row clickable"
+                          key={p.id}
+                          onClick={() => full && setModal({ product: full })}
+                        >
+                          <span className="mini-name">{p.name}</span>
+                          <span className={'pill ' + (p.quantity <= 0 ? 'out' : 'low')}>
+                            {p.quantity <= 0 ? 'Нет в наличии' : `Мало · ${p.quantity} шт`}
+                          </span>
+                        </button>
+                      );
+                    })
                   ) : (
                     <p style={{ color: 'var(--muted)', fontSize: 12, padding: '16px 0' }}>Все позиции в достаточном количестве</p>
                   )}
                 </div>
               </div>
+
               <div className="panel">
                 <h3>Последние продажи</h3>
                 <p className="sub">Свежие операции с кассы</p>

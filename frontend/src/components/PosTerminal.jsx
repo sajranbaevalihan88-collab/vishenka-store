@@ -47,6 +47,10 @@ export default function PosTerminal({
   const [showGuide, setShowGuide] = useState(false);
   const [subTab, setSubTab] = useState('pos');
   const [lastScannedCode, setLastScannedCode] = useState('');
+  const [onlyInStock, setOnlyInStock] = useState(true);
+  const [openDiscRowId, setOpenDiscRowId] = useState(null);
+  const [showReceiptDisc, setShowReceiptDisc] = useState(false);
+  const [showExtraMeta, setShowExtraMeta] = useState(false);
 
   const scanRef = useRef(null);
   const spotlightRef = useRef(null);
@@ -253,6 +257,7 @@ export default function PosTerminal({
     const q = scanInput.trim().toLowerCase();
     const qNorm = normalizeScannedCode(scanInput).toLowerCase();
     return products.filter((p) => {
+      if (onlyInStock && !q && (p.quantity || 0) <= 0) return false;
       if (activeCat !== 'Все' && p.category !== activeCat) return false;
       if (!q) return true;
       const bc = resolveBarcodeValue(p).toLowerCase();
@@ -264,7 +269,7 @@ export default function PosTerminal({
         bc.includes(qNorm)
       );
     });
-  }, [products, activeCat, scanInput]);
+  }, [products, activeCat, scanInput, onlyInStock]);
 
   const submitCheckout = async () => {
     if (!cart.length) {
@@ -632,11 +637,20 @@ export default function PosTerminal({
             )}
 
             <div className="panel pos-catalog-panel">
+              <div className="pos-grid-head">
+                <span className="pos-grid-title">
+                  <b>Быстрый выбор товара</b>
+                  <small>{filteredProducts.length} шт</small>
+                </span>
+                <label className="chk pos-stock-chk">
+                  <input type="checkbox" checked={onlyInStock} onChange={(e) => setOnlyInStock(e.target.checked)} />
+                  <span>Только в наличии</span>
+                </label>
+              </div>
               <div className="pos-grid">
                 {filteredProducts.slice(0, 60).map((p) => {
                   const inCart = cart.find((x) => x.product.id === p.id)?.quantity || 0;
                   const out = (p.quantity || 0) <= 0;
-                  const bc = resolveBarcodeValue(p);
                   return (
                     <button
                       type="button"
@@ -648,18 +662,19 @@ export default function PosTerminal({
                         {p.photos?.length ? (
                           <img src={p.photos[0].url} alt={p.name} />
                         ) : (
-                          <IconHanger size={24} />
+                          <IconHanger size={22} />
                         )}
-                        {inCart > 0 && <span className="pt-in-badge">{inCart}</span>}
+                        {inCart > 0 && <span className="pt-in-badge">В чеке: {inCart}</span>}
                         <span className={'pt-qty ' + (out ? 'out' : p.quantity <= 3 ? 'low' : '')}>
-                          {p.quantity} шт
+                          {out ? 'Нет' : `${p.quantity} шт`}
                         </span>
                       </div>
                       <div className="pt-body">
+                        <div className="pt-cat">{p.category}</div>
                         <div className="pt-name">{p.name}</div>
                         <div className="pt-foot">
                           <b className="num">{money(p.sale_price)}</b>
-                          <small className="mono">{p.code || bc.slice(-6)}</small>
+                          <span className="pt-add-hint">+ В чек</span>
                         </div>
                       </div>
                     </button>
@@ -680,14 +695,14 @@ export default function PosTerminal({
                   <p className="sub">
                     {cart.length
                       ? `${cart.reduce((a, b) => a + b.quantity, 0)} шт · ${cart.length} поз.`
-                      : 'Отсканируйте товар для начала оплаты'}
+                      : 'Отсканируйте бирку или нажмите на товар слева'}
                   </p>
                 </div>
                 {cart.length > 0 && (
                   <button
                     type="button"
                     className="btn btn-danger btn-sm"
-                    onClick={() => { setCart([]); setErr(''); }}
+                    onClick={() => { setCart([]); setErr(''); setOpenDiscRowId(null); }}
                   >
                     Очистить
                   </button>
@@ -699,20 +714,22 @@ export default function PosTerminal({
                   <div className="cart-empty">
                     <div className="ce-ic"><IconScan size={28} /></div>
                     <div>Чек пуст</div>
-                    <small>Отсканируйте бирку сканером или выберите вещь из списка слева</small>
+                    <small>Наведите сканер на штрихкод — товар появится здесь автоматически</small>
                   </div>
                 ) : (
                   cart.map((it) => {
                     const lineGross = it.quantity * Number(it.unit_price || 0);
                     const lineDisc = Math.min(lineGross, Math.max(0, Number(it.discount || 0)));
                     const lineNet = Math.max(0, lineGross - lineDisc);
+                    const isDiscOpen = openDiscRowId === it.product.id;
                     return (
-                      <div className="cart-row" key={it.product.id}>
+                      <div className={'cart-row' + (lineDisc > 0 ? ' discounted' : '')} key={it.product.id}>
                         <div className="cr-top">
                           <div className="cr-info">
                             <div className="cr-name">{it.product.name}</div>
                             <div className="cr-sub num">
-                              {money(it.unit_price)} / шт · ост. {it.product.quantity}
+                              <span>{money(it.unit_price)} / шт</span>
+                              {lineDisc > 0 && <span className="cr-disc-pill">−{money(lineDisc)}</span>}
                             </div>
                           </div>
                           <div className="cr-qty">
@@ -726,6 +743,14 @@ export default function PosTerminal({
                           </div>
                           <button
                             type="button"
+                            className={'cr-disc-toggle' + (isDiscOpen || lineDisc > 0 ? ' active' : '')}
+                            onClick={() => setOpenDiscRowId(isDiscOpen ? null : it.product.id)}
+                            title="Указать скидку на этот товар"
+                          >
+                            %
+                          </button>
+                          <button
+                            type="button"
                             className="cr-del"
                             onClick={() => removeFromCart(it.product.id)}
                             title="Убрать"
@@ -733,84 +758,118 @@ export default function PosTerminal({
                             ×
                           </button>
                         </div>
-                        <div className="cr-disc-row">
-                          <span className="cr-disc-lbl">Скидка:</span>
-                          <div className="cr-disc-inp">
-                            <input
-                              type="number"
-                              min="0"
-                              max={lineGross}
-                              value={lineDisc || ''}
-                              onChange={(e) => updateCartDiscount(it.product.id, e.target.value)}
-                              placeholder="0"
-                              aria-label={`Скидка на ${it.product.name} в сомах`}
-                            />
-                            <span>сом</span>
+                        {isDiscOpen && (
+                          <div className="cr-disc-row">
+                            <span className="cr-disc-lbl">Скидка:</span>
+                            <div className="cr-disc-inp">
+                              <input
+                                type="number"
+                                min="0"
+                                max={lineGross}
+                                value={lineDisc || ''}
+                                onChange={(e) => updateCartDiscount(it.product.id, e.target.value)}
+                                placeholder="0"
+                                aria-label={`Скидка на ${it.product.name} в сомах`}
+                              />
+                              <span>сом</span>
+                            </div>
+                            <div className="cr-disc-quick">
+                              {[100, 200, 500].map((amt) => (
+                                <button
+                                  type="button"
+                                  key={amt}
+                                  className={lineDisc === amt ? 'active' : ''}
+                                  onClick={() => updateCartDiscount(it.product.id, amt)}
+                                >
+                                  −{amt}
+                                </button>
+                              ))}
+                              {lineDisc > 0 && (
+                                <button
+                                  type="button"
+                                  className="clear"
+                                  title="Убрать скидку"
+                                  onClick={() => updateCartDiscount(it.product.id, 0)}
+                                >
+                                  ×
+                                </button>
+                              )}
+                            </div>
                           </div>
-                          <div className="cr-disc-quick">
-                            {[100, 200, 500].map((amt) => (
-                              <button
-                                type="button"
-                                key={amt}
-                                className={lineDisc === amt ? 'active' : ''}
-                                onClick={() => updateCartDiscount(it.product.id, amt)}
-                              >
-                                −{amt}
-                              </button>
-                            ))}
-                            {lineDisc > 0 && (
-                              <button
-                                type="button"
-                                className="clear"
-                                title="Убрать скидку"
-                                onClick={() => updateCartDiscount(it.product.id, 0)}
-                              >
-                                ×
-                              </button>
-                            )}
-                          </div>
-                        </div>
+                        )}
                       </div>
                     );
                   })
                 )}
               </div>
 
-              <div className="discount-bar">
-                <span>На весь чек</span>
-                <div className="disc-pills">
-                  <button
-                    type="button"
-                    className={discountType === 'none' ? 'active' : ''}
-                    onClick={() => { setDiscountType('none'); setDiscountValue(''); }}
-                  >Нет</button>
-                  <button
-                    type="button"
-                    className={discountType === 'percent' ? 'active' : ''}
-                    onClick={() => setDiscountType('percent')}
-                  >%</button>
-                  <button
-                    type="button"
-                    className={discountType === 'amount' ? 'active' : ''}
-                    onClick={() => setDiscountType('amount')}
-                  >сом</button>
-                </div>
-                {discountType !== 'none' && (
-                  <input
-                    type="number"
-                    min="0"
-                    max={discountType === 'percent' ? 100 : afterItemDiscounts}
-                    value={discountValue}
-                    onChange={(e) => setDiscountValue(e.target.value)}
-                    placeholder={discountType === 'percent' ? '10' : 'Сумма'}
-                  />
-                )}
+              <div className="chk-extras-bar">
+                <button
+                  type="button"
+                  className={'chk-extra-chip' + (showReceiptDisc || discountType !== 'none' ? ' active' : '')}
+                  onClick={() => setShowReceiptDisc((v) => !v)}
+                >
+                  {receiptDiscountAmount > 0 ? `Скидка на чек: −${money(receiptDiscountAmount)}` : '+ Скидка на весь чек'}
+                </button>
+                <button
+                  type="button"
+                  className={'chk-extra-chip' + (showExtraMeta || note.trim() || saleDate !== todayISO() ? ' active' : '')}
+                  onClick={() => setShowExtraMeta((v) => !v)}
+                >
+                  {note.trim() ? `Заметка: ${note.trim().slice(0, 14)}…` : 'Дата / заметка'}
+                </button>
               </div>
+
+              {(showReceiptDisc || discountType !== 'none') && (
+                <div className="discount-bar">
+                  <span>Скидка на чек</span>
+                  <div className="disc-pills">
+                    <button
+                      type="button"
+                      className={discountType === 'none' ? 'active' : ''}
+                      onClick={() => { setDiscountType('none'); setDiscountValue(''); }}
+                    >Нет</button>
+                    <button
+                      type="button"
+                      className={discountType === 'percent' ? 'active' : ''}
+                      onClick={() => setDiscountType('percent')}
+                    >%</button>
+                    <button
+                      type="button"
+                      className={discountType === 'amount' ? 'active' : ''}
+                      onClick={() => setDiscountType('amount')}
+                    >сом</button>
+                  </div>
+                  {discountType !== 'none' && (
+                    <input
+                      type="number"
+                      min="0"
+                      max={discountType === 'percent' ? 100 : afterItemDiscounts}
+                      value={discountValue}
+                      onChange={(e) => setDiscountValue(e.target.value)}
+                      placeholder={discountType === 'percent' ? '10' : 'Сумма'}
+                    />
+                  )}
+                </div>
+              )}
+
+              {showExtraMeta && (
+                <div className="form-row" style={{ marginBottom: 12 }}>
+                  <div className="field" style={{ marginBottom: 0 }}>
+                    <label>Дата чека</label>
+                    <input type="date" value={saleDate} onChange={(e) => setSaleDate(e.target.value)} />
+                  </div>
+                  <div className="field" style={{ marginBottom: 0 }}>
+                    <label>Примечание</label>
+                    <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Клиент / заметка" />
+                  </div>
+                </div>
+              )}
 
               <div className="totals-box">
                 {discountAmount > 0 && (
                   <>
-                    <div className="tot-row"><span>Подытог</span><span className="num">{money(subtotal)}</span></div>
+                    <div className="tot-row"><span>Сумма без скидки</span><span className="num">{money(subtotal)}</span></div>
                     {itemDiscountTotal > 0 && (
                       <div className="tot-row disc"><span>Скидка на товары</span><span className="num">−{money(itemDiscountTotal)}</span></div>
                     )}
@@ -843,7 +902,7 @@ export default function PosTerminal({
               {paymentMethod === 'cash' && (
                 <div className="pay-details">
                   <div className="field" style={{ marginBottom: 8 }}>
-                    <label>Получено от клиента (сом)</label>
+                    <label>Получено наличными (сом)</label>
                     <input
                       type="number"
                       min="0"
@@ -909,17 +968,6 @@ export default function PosTerminal({
                 </div>
               )}
 
-              <div className="form-row" style={{ marginTop: 10 }}>
-                <div className="field" style={{ marginBottom: 0 }}>
-                  <label>Дата чека</label>
-                  <input type="date" value={saleDate} onChange={(e) => setSaleDate(e.target.value)} />
-                </div>
-                <div className="field" style={{ marginBottom: 0 }}>
-                  <label>Примечание</label>
-                  <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Клиент / заметка" />
-                </div>
-              </div>
-
               {err && <div className="err">{err}</div>}
 
               <button
@@ -929,7 +977,7 @@ export default function PosTerminal({
                 disabled={busy || !cart.length}
               >
                 <IconCheck size={17} />
-                {busy ? 'Оформляю оплату…' : `Принять оплату · ${money(finalTotal)}`}
+                {busy ? 'Оформляю оплату…' : `Пробить чек · ${money(finalTotal)}`}
               </button>
             </div>
           </div>
