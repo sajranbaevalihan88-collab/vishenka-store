@@ -6,17 +6,12 @@
 """
 from __future__ import annotations
 
+import importlib
 import json
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from tspl_printer import (
-    build_tspl_for_label,
-    calibrate_printer_gap,
-    list_windows_printers,
-    render_label_image,
-    send_raw_to_printer,
-)
+import tspl_printer
 
 BRIDGE_HOST = "127.0.0.1"
 BRIDGE_PORT = 18181
@@ -62,7 +57,7 @@ class _BridgeHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
         if path in ("/status", "/printers", "/api/printers", "/api/local-printer/status"):
-            info = list_windows_printers()
+            info = tspl_printer.list_windows_printers()
             info["bridge"] = "vishenka-tspl"
             info["port"] = BRIDGE_PORT
             self._send_json(200, info)
@@ -78,7 +73,8 @@ class _BridgeHandler(BaseHTTPRequestHandler):
             return
 
         if path in ("/print/labels", "/api/print/labels", "/api/local-printer/labels"):
-            info = list_windows_printers()
+            tp = importlib.reload(tspl_printer)
+            info = tp.list_windows_printers()
             if not info.get("available"):
                 self._send_json(400, {"detail": "Прямая печать доступна только на Windows"})
                 return
@@ -107,7 +103,7 @@ class _BridgeHandler(BaseHTTPRequestHandler):
             try:
                 for it in valid:
                     copies = max(1, min(200, int(it.get("copies") or 1)))
-                    img, w_mm, h_mm = render_label_image(
+                    img, w_mm, h_mm = tp.render_label_image(
                         name=str(it.get("name") or "Товар"),
                         price=it.get("price", 0),
                         barcode=str(it.get("barcode") or ""),
@@ -119,7 +115,7 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                         show_code=show_code,
                     )
                     chunks.append(
-                        build_tspl_for_label(
+                        tp.build_tspl_for_label(
                             img,
                             w_mm,
                             h_mm,
@@ -130,7 +126,7 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                         )
                     )
                     total_copies += copies
-                written = send_raw_to_printer(pname, b"".join(chunks), doc_name="Vishenka Store Labels")
+                written = tp.send_raw_to_printer(pname, b"".join(chunks), doc_name="Vishenka Store Labels")
             except Exception as exc:
                 self._send_json(500, {"detail": f"Ошибка печати на {pname}: {exc}"})
                 return
@@ -139,13 +135,14 @@ class _BridgeHandler(BaseHTTPRequestHandler):
             return
 
         if path in ("/print/calibrate", "/api/print/calibrate", "/api/local-printer/calibrate"):
-            info = list_windows_printers()
+            tp = importlib.reload(tspl_printer)
+            info = tp.list_windows_printers()
             pname = str(data.get("printer_name") or "").strip() or info.get("default_printer") or ""
             if not pname:
                 self._send_json(400, {"detail": "Принтер Xprinter не найден"})
                 return
             try:
-                calibrate_printer_gap(pname, size=str(data.get("size") or "58x40"))
+                tp.calibrate_printer_gap(pname, size=str(data.get("size") or "58x40"))
             except Exception as exc:
                 self._send_json(500, {"detail": f"Ошибка калибровки {pname}: {exc}"})
                 return

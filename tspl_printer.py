@@ -170,7 +170,11 @@ def render_label_image(
     draw = ImageDraw.Draw(img)
 
     pad_x = max(12, int(W * 0.045))
-    pad_y = max(8, int(H * 0.035))
+    # Небольшой верхний отступ + безопасный нижний запас (~10 мм на 58×40),
+    # чтобы с учётом аппаратного смещения датчика зазора XP-365B штрихкод и цифры
+    # гарантированно ложились целиком на ОДНУ наклейку и никогда не упирались в зазор.
+    pad_y = max(4, int(H * 0.015))
+    bottom_safe = max(14, int(H * 0.24)) if h_mm >= 35 else max(10, int(H * 0.14))
     inner_w = W - 2 * pad_x
     scale = W / 464.0  # 1.0 для 58мм, ~0.69 для 40мм, ~0.52 для 30мм
     h_scale = H / 320.0
@@ -179,30 +183,30 @@ def render_label_image(
 
     # 1. Шапка магазина + аккуратная линия
     if show_store and store_name.strip():
-        f_brand = _load_font(max(13, int(20 * scale)), bold=True)
+        f_brand = _load_font(max(12, int(18 * scale)), bold=True)
         b_txt = store_name.strip().upper()
         bw = draw.textlength(b_txt, font=f_brand)
         draw.text(((W - bw) / 2, y), b_txt, font=f_brand, fill=0)
-        y += int(24 * scale) + 3
+        y += int(21 * scale) + 2
         draw.line([(pad_x, y), (W - pad_x, y)], fill=0, width=2)
-        y += max(5, int(7 * h_scale))
+        y += max(4, int(5 * h_scale))
 
     # 2. Название товара (1–2 строки по центру)
-    f_name_sz = max(14, int(23 * min(scale, h_scale + 0.15)))
+    f_name_sz = max(13, int(21 * min(scale, h_scale + 0.15)))
     f_name = _load_font(f_name_sz, bold=True)
     name_lines = _wrap_text(draw, name or "Товар", f_name, inner_w, max_lines=2 if h_mm >= 30 else 1)
-    line_step = int(f_name_sz * 1.15)
+    line_step = int(f_name_sz * 1.12)
     for ln in name_lines:
         lw = draw.textlength(ln, font=f_name)
         draw.text(((W - lw) / 2, y), ln, font=f_name, fill=0)
         y += line_step
-    y += max(3, int(5 * h_scale))
+    y += max(2, int(4 * h_scale))
 
     # 3. Цена и артикул
     has_code = show_code and bool((code or "").strip())
     if show_price or has_code:
-        f_price = _load_font(max(18, int(34 * min(scale, h_scale + 0.12))), bold=True)
-        f_art = _load_font(max(12, int(17 * scale)), bold=True)
+        f_price = _load_font(max(16, int(31 * min(scale, h_scale + 0.12))), bold=True)
+        f_art = _load_font(max(11, int(16 * scale)), bold=True)
         price_txt = _fmt_money(price) if show_price else ""
         art_txt = (code or "").strip()[:14] if has_code else ""
 
@@ -211,30 +215,31 @@ def render_label_image(
             aw = draw.textlength(art_txt, font=f_art)
             bx2 = W - pad_x
             bx1 = bx2 - aw - 12
-            by1 = y + 4
-            by2 = by1 + int(17 * scale) + 8
+            by1 = y + 3
+            by2 = by1 + int(16 * scale) + 7
             draw.rectangle([bx1, by1, bx2, by2], outline=0, width=2)
-            draw.text((bx1 + 6, by1 + 3), art_txt, font=f_art, fill=0)
-            y += int(36 * min(scale, h_scale + 0.12)) + 4
+            draw.text((bx1 + 6, by1 + 2), art_txt, font=f_art, fill=0)
+            y += int(33 * min(scale, h_scale + 0.12)) + 3
         elif price_txt:
             pw = draw.textlength(price_txt, font=f_price)
             draw.text(((W - pw) / 2, y), price_txt, font=f_price, fill=0)
-            y += int(36 * min(scale, h_scale + 0.12)) + 4
+            y += int(33 * min(scale, h_scale + 0.12)) + 3
         elif art_txt:
             aw = draw.textlength(art_txt, font=f_art)
             draw.text(((W - aw) / 2, y), art_txt, font=f_art, fill=0)
-            y += int(22 * scale) + 4
+            y += int(20 * scale) + 3
 
-    # 4. Штрихкод EAN-13 или Code 128B (строго по целым пикселям, максимум контраста!)
+    # 4. Штрихкод EAN-13 или Code 128B (компактно сразу под ценой, с запасом до нижнего зазора)
     bc_val = (barcode or "").strip()
     is_ean = _is_valid_ean13(bc_val)
     bits = _encode_ean13(bc_val) if is_ean else _encode_code128b(bc_val)
 
-    f_bc_sz = max(13, int(20 * scale))
+    f_bc_sz = max(12, int(19 * scale))
     f_bc = _load_font(f_bc_sz, bold=True)
-    digits_h = f_bc_sz + 5
-    avail_h = H - pad_y - y - digits_h - 2
-    bar_h = max(32, min(int(120 * h_scale), avail_h))
+    digits_h = f_bc_sz + 4
+    bar_y = y + max(5, int(8 * h_scale))
+    avail_h = H - bottom_safe - bar_y - digits_h
+    bar_h = max(32, min(int(88 * h_scale), avail_h))
 
     # Подбираем целую ширину модуля (минимум 2 dots на XP-365B чтобы сканер читал мгновенно!)
     usable_bc_w = inner_w - (int(20 * scale) if is_ean else 8)
@@ -246,7 +251,6 @@ def render_label_image(
     if is_ean:
         # Оставляем место слева для первой цифры EAN-13
         start_x = max(pad_x + int(16 * scale), start_x + int(5 * scale))
-    bar_y = max(y + 2, H - pad_y - digits_h - bar_h - 2)
 
     def _is_guard(idx: int) -> bool:
         return is_ean and (idx < 3 or (45 <= idx < 50) or idx >= 92)
@@ -255,11 +259,11 @@ def render_label_image(
         if bit == "1":
             x1 = start_x + idx * mod_w
             x2 = x1 + mod_w - 1
-            extra = 6 if _is_guard(idx) else 0
+            extra = 5 if _is_guard(idx) else 0
             draw.rectangle([x1, bar_y, x2, bar_y + bar_h + extra], fill=0)
 
     # Цифры под штрихкодом
-    txt_y = bar_y + bar_h + 3
+    txt_y = bar_y + bar_h + 2
     if is_ean:
         d0 = bc_val[0]
         g1 = bc_val[1:7]
