@@ -11,7 +11,7 @@ import {
   IconTrend, IconCash, IconBag, IconArrowRight, IconScan, IconInfo,
 } from './components/Icons';
 import { useBarcodeScanner } from './hooks/useBarcodeScanner';
-import { makeRandomEan13, normalizeScannedCode, playScanOk, playScanError } from './utils/barcode';
+import { makeRandomEan13, isValidEan13, normalizeScannedCode, playScanOk, playScanError } from './utils/barcode';
 import { PAYMENT_LABELS, resolveBarcodeValue } from './utils/print';
 
 /* ============================ helpers ============================ */
@@ -261,8 +261,41 @@ function ProductModal({ product, initialBarcode, categories, onClose, onSaved, o
 }
 
 /* ============================ Showcase ============================ */
-function Showcase({ catalog, categories, onAdmin, query, setQuery, cat, setCat }) {
+function Showcase({ catalog, categories, onAdmin, onScannedCode, query, setQuery, cat, setCat }) {
   const [activeProduct, setActiveProduct] = useState(null);
+
+  const matchCatalogByCode = (rawCode) => {
+    const clean = normalizeScannedCode(rawCode).replace(/[\x00-\x1F\x7F]/g, '').trim().toLowerCase();
+    if (!clean) return null;
+    const digits = clean.replace(/\D/g, '');
+    const variants = new Set([clean]);
+    if (digits) {
+      variants.add(digits);
+      if (digits.length === 12) variants.add('0' + digits);
+      if (digits.length === 13 && digits.startsWith('0')) variants.add(digits.slice(1));
+    }
+    return (
+      catalog.find((p) => variants.has(resolveBarcodeValue(p).toLowerCase())) ||
+      catalog.find((p) => variants.has((p.barcode || '').trim().toLowerCase())) ||
+      catalog.find((p) => variants.has((p.code || '').trim().toLowerCase())) ||
+      null
+    );
+  };
+
+  useBarcodeScanner({
+    enabled: !activeProduct,
+    onScan: (code) => {
+      if (onScannedCode?.(code)) return;
+      const found = matchCatalogByCode(code);
+      if (found) {
+        playScanOk(true);
+        setActiveProduct(found);
+      } else {
+        playScanError(true);
+        setQuery(code.toLowerCase());
+      }
+    },
+  });
 
   const list = catalog.filter((p) =>
     (cat === 'Все' || p.category === cat) &&
@@ -320,7 +353,20 @@ function Showcase({ catalog, categories, onAdmin, query, setQuery, cat, setCat }
               <input
                 value={query}
                 onChange={(e) => setQuery(e.target.value.toLowerCase())}
-                placeholder="Поиск по названию или артикулу…"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    const live = (e.currentTarget.value || '').trim();
+                    if (!live) return;
+                    if (onScannedCode?.(live)) { setQuery(''); return; }
+                    const found = matchCatalogByCode(live);
+                    if (found) {
+                      e.preventDefault();
+                      setActiveProduct(found);
+                      setQuery('');
+                    }
+                  }
+                }}
+                placeholder="Поиск по названию, артикулу или штрихкоду…"
               />
             </div>
           </div>
@@ -528,7 +574,10 @@ function StatsPanel({ stats }) {
 }
 
 /* ============================ Admin ============================ */
-function Admin({ data, stats, apiVersion, storeSettings, setStoreSettings, categories, onExit, onSite, refresh, notify }) {
+function Admin({
+  data, stats, apiVersion, storeSettings, setStoreSettings, categories,
+  onExit, onSite, refresh, notify, initialPendingScan, clearInitialPendingScan,
+}) {
   const [tab, setTab] = useState('pos');
   const [modal, setModal] = useState(null);
   const [labelModalProducts, setLabelModalProducts] = useState(null);
@@ -549,6 +598,14 @@ function Admin({ data, stats, apiVersion, storeSettings, setStoreSettings, categ
     if (storeSettings) setSettingsForm(storeSettings);
   }, [storeSettings]);
 
+  useEffect(() => {
+    if (initialPendingScan?.code) {
+      setTab('pos');
+      setPendingScan({ code: initialPendingScan.code, ts: Date.now() });
+      clearInitialPendingScan?.();
+    }
+  }, [initialPendingScan, clearInitialPendingScan]);
+
   const products = data.products || [];
   const sales = data.sales || [];
   const reports = data.reports || [];
@@ -564,26 +621,19 @@ function Admin({ data, stats, apiVersion, storeSettings, setStoreSettings, categ
     data: 'Настройки и база',
   };
 
+  const openScannedInPos = useCallback((rawCode) => {
+    const clean = normalizeScannedCode(rawCode).replace(/[\x00-\x1F\x7F]/g, '').trim();
+    if (!clean) return;
+    setGlobalScanPopup(null);
+    setTab('pos');
+    setPendingScan({ code: clean, ts: Date.now() });
+  }, []);
+
   useBarcodeScanner({
     enabled: !modal && !labelModalProducts,
     onScan: (code) => {
-      if (tab === 'pos') {
-        setPendingScan({ code, ts: Date.now() });
-        return;
-      }
-      const lc = code.toLowerCase();
-      const found =
-        products.find((p) => resolveBarcodeValue(p).toLowerCase() === lc) ||
-        products.find((p) => (p.barcode || '').toLowerCase() === lc) ||
-        products.find((p) => (p.code || '').toLowerCase() === lc);
-
-      if (found) {
-        playScanOk(soundOn);
-        setGlobalScanPopup({ code, product: found });
-      } else {
-        playScanError(soundOn);
-        setGlobalScanPopup({ code, product: null });
-      }
+      // На любой вкладке админки сразу открываем отсканированный товар в Кассе (со скидкой и карточкой)
+      openScannedInPos(code);
     },
   });
 
@@ -870,7 +920,33 @@ function Admin({ data, stats, apiVersion, storeSettings, setStoreSettings, categ
                   <IconSearch size={15} />
                   <input
                     value={productSearch}
-                    onChange={(e) => setProductSearch(e.target.value)}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setProductSearch(val);
+                      const norm = normalizeScannedCode(val).replace(/[\x00-\x1F\x7F]/g, '').trim();
+                      if (norm.length >= 12 && isValidEan13(norm)) {
+                        setProductSearch('');
+                        openScannedInPos(norm);
+                      }
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        const live = (e.currentTarget.value || '').trim();
+                        const norm = normalizeScannedCode(live).replace(/[\x00-\x1F\x7F]/g, '').trim();
+                        if (!norm) return;
+                        const exact = products.find(
+                          (p) =>
+                            resolveBarcodeValue(p).toLowerCase() === norm.toLowerCase() ||
+                            (p.barcode || '').trim().toLowerCase() === norm.toLowerCase() ||
+                            (p.code || '').trim().toLowerCase() === norm.toLowerCase()
+                        );
+                        if (exact || isValidEan13(norm)) {
+                          e.preventDefault();
+                          setProductSearch('');
+                          openScannedInPos(norm);
+                        }
+                      }
+                    }}
                     placeholder="Поиск по названию, коду или штрихкоду…"
                   />
                 </div>
@@ -1232,6 +1308,7 @@ export default function App() {
     auto_print_receipt: false,
   });
   const [fatal, setFatal] = useState('');
+  const [sitePendingScan, setSitePendingScan] = useState(null);
 
   const notify = useCallback((text) => { setToast(text); setTimeout(() => setToast(''), 3000); }, []);
 
@@ -1287,7 +1364,22 @@ export default function App() {
     <>
       {fatal && <div className="fatal">{fatal}</div>}
       {view === 'site' ? (
-        <Showcase catalog={catalog} categories={categories} onAdmin={openAdmin} query={query} setQuery={setQuery} cat={cat} setCat={setCat} />
+        <Showcase
+          catalog={catalog}
+          categories={categories}
+          onAdmin={openAdmin}
+          onScannedCode={(code) => {
+            if (!authed) return false;
+            setSitePendingScan({ code, ts: Date.now() });
+            setView('admin');
+            window.scrollTo(0, 0);
+            return true;
+          }}
+          query={query}
+          setQuery={setQuery}
+          cat={cat}
+          setCat={setCat}
+        />
       ) : (
         <Admin
           data={adminData}
@@ -1300,6 +1392,8 @@ export default function App() {
           onSite={() => setView('site')}
           refresh={refresh}
           notify={notify}
+          initialPendingScan={sitePendingScan}
+          clearInitialPendingScan={() => setSitePendingScan(null)}
         />
       )}
 

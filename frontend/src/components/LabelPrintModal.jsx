@@ -1,9 +1,24 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import BarcodeSvg from './BarcodeSvg';
 import { IconPrinter, IconDownload, IconInfo, IconRefresh } from './Icons';
 import { LABEL_PRESETS, printBarcodeLabels, downloadBarcodeSvg, resolveBarcodeValue } from '../utils/print';
 
 const money = (n) => new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 }).format(n || 0) + ' сом';
+
+const LOCAL_BRIDGES = [
+  { statusUrl: 'http://127.0.0.1:18181/status', printUrl: 'http://127.0.0.1:18181/print/labels', calibrateUrl: 'http://127.0.0.1:18181/print/calibrate' },
+  { statusUrl: 'http://127.0.0.1:8000/api/local-printer/status', printUrl: 'http://127.0.0.1:8000/api/local-printer/labels', calibrateUrl: 'http://127.0.0.1:8000/api/local-printer/calibrate' },
+];
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 1800) {
+  const ctrl = new AbortController();
+  const id = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: ctrl.signal });
+  } finally {
+    clearTimeout(id);
+  }
+}
 
 export default function LabelPrintModal({ products, storeSettings, api, onClose, notify }) {
   const [size, setSize] = useState(storeSettings?.label_size || '58x40');
@@ -19,32 +34,68 @@ export default function LabelPrintModal({ products, storeSettings, api, onClose,
     return initial;
   });
 
-  // Прямая TSPL-печать на Xprinter (без диалога браузера, поворота и about:blank)
+  // Прямая TSPL-печать на Xprinter (работает И на localhost, И на Render через локальный мост 127.0.0.1:18181)
   const [printerInfo, setPrinterInfo] = useState({ available: false, printers: [], default_printer: '' });
+  const [bridgeTarget, setBridgeTarget] = useState(null); // null = same-origin /api/print/*, либо объект LOCAL_BRIDGES
   const [selectedPrinter, setSelectedPrinter] = useState('');
+  const [checkingBridge, setCheckingBridge] = useState(false);
   const [printing, setPrinting] = useState(false);
   const [calibrating, setCalibrating] = useState(false);
   const [printErr, setPrintErr] = useState('');
 
-  useEffect(() => {
-    if (!api) return;
-    let alive = true;
-    api('/api/printers')
-      .then((info) => {
-        if (!alive || !info) return;
-        setPrinterInfo(info);
-        setSelectedPrinter(info.default_printer || info.printers?.[0] || '');
-      })
-      .catch(() => {});
-    return () => { alive = false; };
+  const detectPrinters = useCallback(async () => {
+    setCheckingBridge(true);
+    setPrintErr('');
+    try {
+      // 1. Сначала проверяем same-origin (когда сайт открыт локально на localhost:8000)
+      if (api) {
+        try {
+          const info = await api('/api/printers');
+          if (info?.available) {
+            setBridgeTarget(null);
+            setPrinterInfo(info);
+            setSelectedPrinter((prev) => (prev && info.printers?.includes(prev) ? prev : info.default_printer || info.printers?.[0] || ''));
+            return;
+          }
+        } catch {
+          // игнорируем — попробуем локальный мост ниже
+        }
+      }
+
+      // 2. Если сайт открыт на Render / Vercel — подключаемся к локальному TSPL-мосту на ноутбуке
+      for (const b of LOCAL_BRIDGES) {
+        try {
+          const res = await fetchWithTimeout(b.statusUrl, { method: 'GET', mode: 'cors' }, 1600);
+          if (!res.ok) continue;
+          const info = await res.json();
+          if (info?.available) {
+            setBridgeTarget(b);
+            setPrinterInfo(info);
+            setSelectedPrinter((prev) => (prev && info.printers?.includes(prev) ? prev : info.default_printer || info.printers?.[0] || ''));
+            return;
+          }
+        } catch {
+          // пробуем следующий порт
+        }
+      }
+
+      setBridgeTarget(null);
+      setPrinterInfo({ available: false, printers: [], default_printer: '' });
+    } finally {
+      setCheckingBridge(false);
+    }
   }, [api]);
+
+  useEffect(() => {
+    detectPrinters();
+  }, [detectPrinters]);
 
   const storeName = storeSettings?.store_name || 'Vishenka Store';
   const previewProduct = products[0];
   const previewCode = resolveBarcodeValue(previewProduct);
   const preset = LABEL_PRESETS[size] || LABEL_PRESETS['58x40'];
   const hasArt = showCode && Boolean(previewProduct?.code);
-  const canDirectPrint = Boolean(printerInfo.available && selectedPrinter && size !== 'a4' && api);
+  const canDirectPrint = Boolean(printerInfo.available && selectedPrinter && size !== 'a4' && (bridgeTarget || api));
 
   const totalLabels = useMemo(
     () => products.reduce((acc, p) => acc + Math.max(0, Number(copiesMap[p.id]) || 0), 0),
@@ -72,8 +123,29 @@ export default function LabelPrintModal({ products, storeSettings, api, onClose,
     if (ok) notify?.(`Открыто окно печати: ${totalLabels} этик.`);
   };
 
+  const callDirectEndpoint = async (type, payload) => {
+    if (bridgeTarget) {
+      const url = type === 'calibrate' ? bridgeTarget.calibrateUrl : bridgeTarget.printUrl;
+      const res = await fetchWithTimeout(
+        url,
+        {
+          method: 'POST',
+          mode: 'cors',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        },
+        15000
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || data.error || 'Ошибка локального принтера');
+      return data;
+    }
+    const path = type === 'calibrate' ? '/api/print/calibrate' : '/api/print/labels';
+    return api(path, { method: 'POST', body: payload });
+  };
+
   const sendDirectLabels = async (list) => {
-    if (!api || !selectedPrinter) return;
+    if (!selectedPrinter) return;
     setPrintErr('');
     setPrinting(true);
     try {
@@ -95,7 +167,7 @@ export default function LabelPrintModal({ products, storeSettings, api, onClose,
           copies,
         })),
       };
-      const res = await api('/api/print/labels', { method: 'POST', body: payload });
+      const res = await callDirectEndpoint('labels', payload);
       notify?.(`Напечатано на ${res.printer}: ${res.labels_printed} шт`);
     } catch (e) {
       setPrintErr(e.message || 'Ошибка прямой печати');
@@ -121,14 +193,11 @@ export default function LabelPrintModal({ products, storeSettings, api, onClose,
   };
 
   const handleCalibrate = async () => {
-    if (!api || !selectedPrinter) return;
+    if (!selectedPrinter) return;
     setPrintErr('');
     setCalibrating(true);
     try {
-      await api('/api/print/calibrate', {
-        method: 'POST',
-        body: { printer_name: selectedPrinter, size },
-      });
+      await callDirectEndpoint('calibrate', { printer_name: selectedPrinter, size });
       notify?.(`Датчик ленты откалиброван (${selectedPrinter})`);
     } catch (e) {
       setPrintErr(e.message || 'Ошибка калибровки');
@@ -184,12 +253,14 @@ export default function LabelPrintModal({ products, storeSettings, api, onClose,
           </div>
 
           <div className="label-controls">
-            {printerInfo.available && (
+            {printerInfo.available ? (
               <div className="direct-print-box">
                 <div className="dp-head">
                   <span className={'dp-status ' + (selectedPrinter ? 'ok' : 'warn')}>
                     <span className="dp-dot" />
-                    {selectedPrinter ? 'Прямая печать Xprinter (TSPL)' : 'Принтер не выбран'}
+                    {selectedPrinter
+                      ? (bridgeTarget ? 'Прямая печать Xprinter (мост активен)' : 'Прямая печать Xprinter (TSPL)')
+                      : 'Принтер не выбран'}
                   </span>
                   {selectedPrinter && size !== 'a4' && (
                     <div className="dp-actions">
@@ -227,6 +298,26 @@ export default function LabelPrintModal({ products, storeSettings, api, onClose,
                     </select>
                   </div>
                 )}
+              </div>
+            ) : (
+              <div className="direct-print-box offline">
+                <div className="dp-head">
+                  <span className="dp-status warn">
+                    <span className="dp-dot" />
+                    {checkingBridge ? 'Ищу Xprinter на компьютере…' : 'Локальный мост Xprinter не запущен'}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    onClick={detectPrinters}
+                    disabled={checkingBridge}
+                  >
+                    <IconRefresh size={13} /> Проверить
+                  </button>
+                </div>
+                <div className="dp-offline-note">
+                  Чтобы печатать с Render ровно без «about:blank», запустите <b>start_printer_bridge.bat</b> на ноутбуке и нажмите «Проверить».
+                </div>
               </div>
             )}
 
@@ -292,11 +383,11 @@ export default function LabelPrintModal({ products, storeSettings, api, onClose,
               <IconInfo size={15} />
               {canDirectPrint ? (
                 <span>
-                  Печать идёт <b>напрямую в {selectedPrinter}</b> (TSPL, {preset.w}×{preset.h} мм) — ровно по наклейке, без окна браузера и без надписи «about:blank». Если лента съехала после замены рулона — нажмите <b>Калибровка</b>.
+                  Печать идёт <b>напрямую в {selectedPrinter}</b> (TSPL, {preset.w}×{preset.h} мм) — ровно по наклейке, без окна браузера и без надписи «about:blank». Если лента съехала — нажмите <b>Калибровка</b>.
                 </span>
               ) : (
                 <span>
-                  В окне печати браузера выберите принтер <b>Xprinter</b>, размер <b>{preset.w}×{preset.h} мм</b>, поля — <b>Нет</b>, масштаб — <b>100%</b> и снимите галочку <b>Колонтитулы</b>.
+                  В окне печати браузера выберите принтер <b>Xprinter</b>, размер <b>60×40 мм</b> (или {preset.w}×{preset.h} мм), поля — <b>Нет</b>, масштаб — <b>100%</b> и снимите галочку <b>Колонтитулы</b>.
                 </span>
               )}
             </div>
@@ -316,7 +407,7 @@ export default function LabelPrintModal({ products, storeSettings, api, onClose,
             </>
           ) : (
             <button type="button" className="btn btn-primary" onClick={handleBrowserPrint} disabled={totalLabels <= 0}>
-              <IconPrinter size={15} /> Печать на Xprinter ({totalLabels} шт)
+              <IconPrinter size={15} /> Печать через браузер ({totalLabels} шт)
             </button>
           )}
         </div>

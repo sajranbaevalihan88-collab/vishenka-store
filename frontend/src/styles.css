@@ -975,6 +975,17 @@ footer p { font-size: 12px; }
   background: #edf7f1; border: 1px solid #cde5d6; border-radius: 8px;
   padding: 10px 12px; margin-bottom: 12px;
 }
+.direct-print-box.offline {
+  background: #fdf6e9; border-color: #eedab2;
+}
+.dp-offline-note {
+  margin-top: 6px; font-size: 11px; color: #7a5a1e; line-height: 1.45;
+}
+.dp-offline-note b { color: var(--ink); }
+.last-scan-chip {
+  background: var(--wine-900); color: var(--gold-100);
+  padding: 2px 7px; border-radius: 5px; font-size: 10.5px; font-weight: 700;
+}
 .dp-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
 .dp-status { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 700; color: var(--green); }
 .dp-status.warn { color: var(--amber); }

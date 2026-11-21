@@ -65,7 +65,8 @@ _RU_TO_EN = str.maketrans(
 
 
 def normalize_barcode(raw: str) -> str:
-    return (raw or "").strip().translate(_RU_TO_EN)
+    cleaned = "".join(ch for ch in (raw or "") if ord(ch) >= 32 and ord(ch) != 127)
+    return cleaned.strip().translate(_RU_TO_EN)
 
 
 # ---------------------------------------------------------------- модели
@@ -391,21 +392,29 @@ def products(request: Request, q: str = "", category: str = "", _=Depends(requir
 @app.get("/api/products/lookup")
 def lookup_product(code: str, request: Request, _=Depends(require_auth)):
     """Мгновенный поиск товара по отсканированному штрихкоду или артикулу."""
-    raw = (code or "").strip()
+    raw = "".join(ch for ch in (code or "") if ord(ch) >= 32 and ord(ch) != 127).strip()
     norm = normalize_barcode(raw)
+    digits = "".join(ch for ch in norm if ch.isdigit())
     if not raw:
         raise HTTPException(400, "Пустой штрихкод")
     with get_conn() as conn:
         with conn.cursor() as cur:
+            backfill_barcodes(cur)
+            candidates = {raw.lower(), norm.lower()}
+            if digits:
+                candidates.add(digits)
+                if len(digits) == 12:
+                    candidates.add("0" + digits)
+                if len(digits) == 13 and digits.startswith("0"):
+                    candidates.add(digits[1:])
+            cand_list = [c for c in candidates if c]
             cur.execute(
                 """SELECT * FROM products
-                   WHERE LOWER(barcode) = LOWER(%s)
-                      OR LOWER(barcode) = LOWER(%s)
-                      OR LOWER(code) = LOWER(%s)
-                      OR LOWER(code) = LOWER(%s)
-                   ORDER BY CASE WHEN LOWER(barcode) = LOWER(%s) THEN 0 ELSE 1 END, id DESC
+                   WHERE LOWER(TRIM(barcode)) = ANY(%s)
+                      OR LOWER(TRIM(code)) = ANY(%s)
+                   ORDER BY CASE WHEN LOWER(TRIM(barcode)) = ANY(%s) THEN 0 ELSE 1 END, id DESC
                    LIMIT 1""",
-                (raw, norm, raw, norm, norm),
+                (cand_list, cand_list, cand_list),
             )
             row = cur.fetchone()
             if not row:
@@ -1057,6 +1066,142 @@ def calibrate_printer(data: CalibratePrinterIn, request: Request, _=Depends(requ
     except Exception as exc:
         raise HTTPException(500, f"Ошибка калибровки {pname}: {exc}")
     return {"ok": True, "printer": pname}
+
+
+def _loopback_cors_headers(request: Request) -> dict[str, str]:
+    origin = request.headers.get("origin") or "*"
+    return {
+        "Access-Control-Allow-Origin": origin,
+        "Vary": "Origin",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        "Access-Control-Allow-Private-Network": "true",
+        "Access-Control-Max-Age": "86400",
+    }
+
+
+def _require_loopback(request: Request) -> None:
+    host = request.client.host if request.client else ""
+    if host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(403, "Локальный мост принтера доступен только с этого компьютера")
+
+
+@app.options("/api/local-printer/{rest:path}")
+def local_printer_options(rest: str, request: Request):
+    return Response(status_code=204, headers=_loopback_cors_headers(request))
+
+
+@app.get("/api/local-printer/status")
+def local_printer_status(request: Request):
+    """Мост для Render/Vercel: позволяет облачному сайту печатать на локальный USB Xprinter."""
+    _require_loopback(request)
+    info = list_windows_printers()
+    info["bridge"] = "vishenka-app"
+    return Response(
+        content=json.dumps(info, ensure_ascii=False),
+        media_type="application/json",
+        headers=_loopback_cors_headers(request),
+    )
+
+
+@app.post("/api/local-printer/labels")
+def local_printer_labels(data: DirectPrintLabelsIn, request: Request):
+    _require_loopback(request)
+    headers = _loopback_cors_headers(request)
+    info = list_windows_printers()
+    if not info.get("available"):
+        return Response(
+            content=json.dumps({"detail": "Прямая печать доступна только на Windows"}, ensure_ascii=False),
+            status_code=400,
+            media_type="application/json",
+            headers=headers,
+        )
+    pname = (data.printer_name or "").strip() or info.get("default_printer") or ""
+    if not pname:
+        return Response(
+            content=json.dumps({"detail": "Принтер Xprinter не найден в Windows"}, ensure_ascii=False),
+            status_code=400,
+            media_type="application/json",
+            headers=headers,
+        )
+    valid_items = [it for it in data.items if int(it.copies or 0) > 0]
+    if not valid_items:
+        return Response(
+            content=json.dumps({"detail": "Нет этикеток для печати"}, ensure_ascii=False),
+            status_code=400,
+            media_type="application/json",
+            headers=headers,
+        )
+    chunks: list[bytes] = []
+    total_copies = 0
+    try:
+        for it in valid_items:
+            copies = max(1, min(200, int(it.copies)))
+            img, w_mm, h_mm = render_label_image(
+                name=it.name,
+                price=it.price,
+                barcode=it.barcode,
+                code=it.code,
+                store_name=data.store_name,
+                size=data.size,
+                show_store=data.show_store,
+                show_price=data.show_price,
+                show_code=data.show_code,
+            )
+            chunks.append(
+                build_tspl_for_label(
+                    img,
+                    w_mm,
+                    h_mm,
+                    copies=copies,
+                    gap_mm=max(1, min(6, int(data.gap_mm))),
+                    density=max(1, min(15, int(data.density))),
+                    direction=data.direction,
+                )
+            )
+            total_copies += copies
+        written = send_raw_to_printer(pname, b"".join(chunks), doc_name="Vishenka Store Labels")
+    except Exception as exc:
+        return Response(
+            content=json.dumps({"detail": f"Ошибка печати на {pname}: {exc}"}, ensure_ascii=False),
+            status_code=500,
+            media_type="application/json",
+            headers=headers,
+        )
+    return Response(
+        content=json.dumps({"ok": True, "printer": pname, "labels_printed": total_copies, "bytes": written}, ensure_ascii=False),
+        media_type="application/json",
+        headers=headers,
+    )
+
+
+@app.post("/api/local-printer/calibrate")
+def local_printer_calibrate(data: CalibratePrinterIn, request: Request):
+    _require_loopback(request)
+    headers = _loopback_cors_headers(request)
+    info = list_windows_printers()
+    pname = (data.printer_name or "").strip() or info.get("default_printer") or ""
+    if not pname:
+        return Response(
+            content=json.dumps({"detail": "Принтер Xprinter не найден"}, ensure_ascii=False),
+            status_code=400,
+            media_type="application/json",
+            headers=headers,
+        )
+    try:
+        calibrate_printer_gap(pname, size=data.size)
+    except Exception as exc:
+        return Response(
+            content=json.dumps({"detail": f"Ошибка калибровки {pname}: {exc}"}, ensure_ascii=False),
+            status_code=500,
+            media_type="application/json",
+            headers=headers,
+        )
+    return Response(
+        content=json.dumps({"ok": True, "printer": pname}, ensure_ascii=False),
+        media_type="application/json",
+        headers=headers,
+    )
 
 
 # ---------------------------------------------------------------- STATIC

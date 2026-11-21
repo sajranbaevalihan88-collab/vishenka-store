@@ -4,7 +4,7 @@ import {
   IconScan, IconPos, IconReceipt, IconCash, IconQr, IconSplit,
   IconPrinter, IconTrash, IconBarcode, IconPlus, IconCheck, IconHanger, IconInfo,
 } from './Icons';
-import { normalizeScannedCode, playScanOk, playScanError, playCashRegister } from '../utils/barcode';
+import { normalizeScannedCode, isValidEan13, playScanOk, playScanError, playCashRegister } from '../utils/barcode';
 import { printThermalReceipt, PAYMENT_LABELS, resolveBarcodeValue } from '../utils/print';
 
 const money = (n) => new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 }).format(n || 0) + ' сом';
@@ -46,9 +46,24 @@ export default function PosTerminal({
   const [completedReceipt, setCompletedReceipt] = useState(null);
   const [showGuide, setShowGuide] = useState(false);
   const [subTab, setSubTab] = useState('pos');
+  const [lastScannedCode, setLastScannedCode] = useState('');
 
   const scanRef = useRef(null);
+  const spotlightRef = useRef(null);
+  const autoScanTimerRef = useRef(null);
   const soundOn = storeSettings?.sound_enabled !== false;
+
+  useEffect(() => {
+    return () => {
+      if (autoScanTimerRef.current) clearTimeout(autoScanTimerRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (spotlight?.ts && spotlightRef.current) {
+      spotlightRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }, [spotlight?.ts]);
 
   const addToCart = (product, viaScanner = false) => {
     setErr('');
@@ -87,15 +102,33 @@ export default function PosTerminal({
     }
   };
 
-  const handleBarcodeLookup = async (rawCode) => {
-    const clean = normalizeScannedCode(rawCode);
-    if (!clean) return;
+  const findLocalProductByCode = (clean) => {
     const lc = clean.toLowerCase();
+    const digits = clean.replace(/\D/g, '');
+    const digitVariants = new Set([lc]);
+    if (digits) {
+      digitVariants.add(digits);
+      if (digits.length === 12) digitVariants.add('0' + digits);
+      if (digits.length === 13 && digits.startsWith('0')) digitVariants.add(digits.slice(1));
+    }
+    return (
+      products.find((p) => digitVariants.has(resolveBarcodeValue(p).toLowerCase())) ||
+      products.find((p) => digitVariants.has((p.barcode || '').trim().toLowerCase())) ||
+      products.find((p) => digitVariants.has((p.code || '').trim().toLowerCase())) ||
+      null
+    );
+  };
 
-    const localMatch =
-      products.find((p) => resolveBarcodeValue(p).toLowerCase() === lc) ||
-      products.find((p) => (p.barcode || '').toLowerCase() === lc) ||
-      products.find((p) => (p.code || '').toLowerCase() === lc);
+  const handleBarcodeLookup = async (rawCode) => {
+    if (autoScanTimerRef.current) {
+      clearTimeout(autoScanTimerRef.current);
+      autoScanTimerRef.current = null;
+    }
+    const clean = normalizeScannedCode(rawCode).replace(/[\x00-\x1F\x7F]/g, '').trim();
+    if (!clean) return;
+    setLastScannedCode(clean);
+
+    const localMatch = findLocalProductByCode(clean);
 
     if (localMatch) {
       addToCart(localMatch, true);
@@ -117,6 +150,7 @@ export default function PosTerminal({
     playScanError(soundOn);
     setSpotlight({ product: null, status: 'notfound', code: clean, ts: Date.now() });
     setErr(`Товар со штрихкодом «${clean}» не найден в базе`);
+    setScanInput('');
   };
 
   useEffect(() => {
@@ -371,6 +405,11 @@ export default function PosTerminal({
         <div className="scanner-status-pill">
           <span className="pulse-dot" />
           <span>Сканер HID готов к работе</span>
+          {lastScannedCode && (
+            <span className="last-scan-chip mono" title="Последний полученный от сканера код">
+              Код: {lastScannedCode}
+            </span>
+          )}
           <button type="button" className="help-link" onClick={() => setShowGuide((v) => !v)}>
             <IconInfo size={13} /> Подключение
           </button>
@@ -414,11 +453,24 @@ export default function PosTerminal({
                     ref={scanRef}
                     data-scanner-input="true"
                     value={scanInput}
-                    onChange={(e) => setScanInput(e.target.value)}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setScanInput(val);
+                      if (autoScanTimerRef.current) clearTimeout(autoScanTimerRef.current);
+                      const norm = normalizeScannedCode(val).replace(/[\x00-\x1F\x7F]/g, '').trim();
+                      if (norm.length >= 6 && (isValidEan13(norm) || Boolean(findLocalProductByCode(norm)))) {
+                        autoScanTimerRef.current = setTimeout(() => {
+                          handleBarcodeLookup(norm);
+                        }, 160);
+                      }
+                    }}
                     onKeyDown={(e) => {
-                      if (e.key === 'Enter' && scanInput.trim()) {
-                        e.preventDefault();
-                        handleBarcodeLookup(scanInput);
+                      if (e.key === 'Enter' || e.key === 'Tab') {
+                        const liveVal = (e.currentTarget.value || '').trim();
+                        if (liveVal) {
+                          e.preventDefault();
+                          handleBarcodeLookup(liveVal);
+                        }
                       }
                     }}
                     placeholder="Сканируйте штрихкод или введите название / артикул…"
@@ -454,7 +506,7 @@ export default function PosTerminal({
             </div>
 
             {spotlight && (
-              <div className={'panel spotlight-card ' + spotlight.status}>
+              <div ref={spotlightRef} className={'panel spotlight-card ' + spotlight.status}>
                 {spotlight.product ? (
                   <div className="spot-in">
                     <div className="spot-photo">

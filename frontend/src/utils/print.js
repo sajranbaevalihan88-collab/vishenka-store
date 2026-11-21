@@ -102,11 +102,12 @@ export function printBarcodeLabels(items, opts = {}) {
        .sticker { border: 0.3mm dashed #bbb; height: ${preset.h}mm; page-break-inside: avoid; }`
     : `@page { size: ${preset.w}mm ${preset.h}mm; margin: 0 !important; }
        @media print {
-         html, body { width: ${preset.w}mm; margin: 0 !important; padding: 0 !important; }
+         html, body { width: ${preset.w}mm !important; height: auto !important; margin: 0 !important; padding: 0 !important; overflow: visible !important; }
+         .sticker { width: ${preset.w}mm !important; height: ${preset.h}mm !important; max-height: ${preset.h}mm !important; overflow: hidden !important; page-break-after: always; break-after: page; page-break-inside: avoid; break-inside: avoid; }
+         .sticker:last-child { page-break-after: auto; break-after: auto; }
        }
        body { margin: 0; padding: 0; }
-       .sticker { width: ${preset.w}mm; height: ${preset.h}mm; page-break-after: always; break-after: page; page-break-inside: avoid; }
-       .sticker:last-child { page-break-after: auto; break-after: auto; }`;
+       .sticker { width: ${preset.w}mm; height: ${preset.h}mm; }`;
 
   const html = `<!doctype html>
 <html lang="ru">

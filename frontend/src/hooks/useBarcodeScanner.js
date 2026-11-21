@@ -1,16 +1,14 @@
 import { useEffect, useRef } from 'react';
-import { normalizeScannedCode } from '../utils/barcode';
+import { normalizeScannedCode, isValidEan13 } from '../utils/barcode';
 
 /**
- * Глобальный перехватчик USB / 2.4GHz беспроводного сканера штрихкодов (HID Keyboard).
+ * Глобальный перехватчик USB / 2.4GHz / Bluetooth сканера штрихкодов (HID Keyboard).
  *
- * Как работает:
- * - Аппаратный сканер передаёт символы серией быстрее ~65мс между клавишами и завершает Enter/Tab.
- * - Поддерживает русскую и английскую раскладки Windows автоматически.
- * - Когда курсор НЕ в поле ввода — перехватывает штрихкод в любой точке админки.
- * - Когда курсор в обычном input/textarea — НЕ мешает ручному вводу, но если символы
- *   прилетают со скоростью сканера в специальном поле [data-scanner-input="true"],
- *   перехватывает и обрабатывает мгновенно.
+ * Особенности:
+ * - Работает при русской и английской раскладках Windows, с Numpad и обычными цифрами.
+ * - Работает с Enter/Tab суффиксом И даже если сканер НЕ передаёт Enter (авто-триггер
+ *   для валидного EAN-13 или быстрой серии из 8+ цифр после паузы 230мс).
+ * - Устойчив к более медленным беспроводным 2.4GHz / Bluetooth сканерам (до 150мс между символами).
  */
 export function useBarcodeScanner({ enabled = true, onScan }) {
   const onScanRef = useRef(onScan);
@@ -22,14 +20,23 @@ export function useBarcodeScanner({ enabled = true, onScan }) {
     let buffer = '';
     let lastTime = 0;
     let fastStreak = 0;
-    let resetTimer = null;
+    let idleTimer = null;
 
     const clear = () => {
       buffer = '';
       fastStreak = 0;
-      if (resetTimer) {
-        clearTimeout(resetTimer);
-        resetTimer = null;
+      lastTime = 0;
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+        idleTimer = null;
+      }
+    };
+
+    const emit = (raw) => {
+      const code = normalizeScannedCode(raw).replace(/[\x00-\x1F\x7F]/g, '').trim();
+      clear();
+      if (code && code.length >= 4 && onScanRef.current) {
+        onScanRef.current(code);
       }
     };
 
@@ -38,57 +45,67 @@ export function useBarcodeScanner({ enabled = true, onScan }) {
 
       const target = e.target;
       const tag = target?.tagName;
-      const isInput = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable;
-      const isScannerField = target?.dataset?.scannerInput === 'true';
+      const inputType = (target?.type || '').toLowerCase();
+      const isTextInput =
+        (tag === 'INPUT' && !['button', 'submit', 'reset', 'checkbox', 'radio', 'file'].includes(inputType)) ||
+        tag === 'TEXTAREA' ||
+        target?.isContentEditable;
 
-      // Если пользователь печатает в обычном текстовом поле (например, название товара или пароль),
-      // не мешаем ручному вводу. Поля с data-scanner-input обрабатываются отдельно в своём onKeyDown.
-      if (isInput && !isScannerField) return;
-      if (isScannerField) return; // Поле сканера само ловит Enter
+      // Поля ввода обрабатывают сканирование в своих onChange / onKeyDown
+      if (isTextInput) return;
 
       const now = Date.now();
-      const delta = now - lastTime;
+      const delta = lastTime > 0 ? now - lastTime : 0;
 
       if (e.key === 'Enter' || e.key === 'Tab') {
-        if (buffer.length >= 4 && (fastStreak >= 2 || delta < 120)) {
+        if (buffer.length >= 4) {
           e.preventDefault();
           e.stopPropagation();
-          const code = normalizeScannedCode(buffer);
-          clear();
-          if (code && onScanRef.current) onScanRef.current(code);
+          emit(buffer);
           return;
         }
         clear();
         return;
       }
 
-      if (e.key.length === 1) {
-        if (lastTime > 0 && delta > 140) {
-          buffer = '';
-          fastStreak = 0;
-        } else if (lastTime > 0 && delta <= 75) {
-          fastStreak += 1;
-        }
+      // Игнорируем служебные клавиши (Shift, CapsLock, AltGraph и т.п.)
+      if (!e.key || e.key.length !== 1) return;
 
-        // Читаем физическую клавишу, если возможно, или нормализуем символ
-        let ch = e.key;
-        if (/^Digit\d$/.test(e.code) && !e.shiftKey) {
-          ch = e.code.slice(5);
-        } else if (/^Numpad\d$/.test(e.code)) {
-          ch = e.code.slice(6);
-        } else if (/^Key[A-Z]$/.test(e.code)) {
-          const letter = e.code.slice(3);
-          ch = e.shiftKey ? letter : letter.toLowerCase();
-        } else if (e.code === 'Minus' && !e.shiftKey) {
-          ch = '-';
-        }
-
-        buffer += ch;
-        lastTime = now;
-
-        if (resetTimer) clearTimeout(resetTimer);
-        resetTimer = setTimeout(clear, 350);
+      if (lastTime > 0 && delta > 260) {
+        buffer = '';
+        fastStreak = 0;
+      } else if (lastTime > 0 && delta <= 140) {
+        fastStreak += 1;
       }
+
+      let ch = e.key;
+      if (/^Digit\d$/.test(e.code) && !e.shiftKey) {
+        ch = e.code.slice(5);
+      } else if (/^Numpad\d$/.test(e.code)) {
+        ch = e.code.slice(6);
+      } else if (/^Key[A-Z]$/.test(e.code)) {
+        const letter = e.code.slice(3);
+        ch = e.shiftKey ? letter : letter.toLowerCase();
+      } else if (e.code === 'Minus' && !e.shiftKey) {
+        ch = '-';
+      }
+
+      buffer += ch;
+      lastTime = now;
+
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        const clean = normalizeScannedCode(buffer).replace(/[\x00-\x1F\x7F]/g, '').trim();
+        // Авто-обработка, даже если сканер настроен без суффикса Enter
+        if (
+          isValidEan13(clean) ||
+          (/^\d{8,20}$/.test(clean) && fastStreak >= 3)
+        ) {
+          emit(clean);
+        } else {
+          clear();
+        }
+      }, 240);
     };
 
     window.addEventListener('keydown', onKeyDown, true);
