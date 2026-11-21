@@ -12,6 +12,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 COPY --from=frontend /app/frontend/dist ./frontend/dist
 COPY app.py db.py config.py seed_products.json ./
+RUN git init -q && git add -A && git -c user.name=x -c user.email=x@x.com commit -qm init
 ENV PORT=8000
 EXPOSE 8000
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
