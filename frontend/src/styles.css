@@ -971,6 +971,26 @@ footer p { font-size: 12px; }
 .xprinter-tip { display: flex; align-items: flex-start; gap: 8px; background: var(--bg); border: 1px solid var(--line); color: var(--muted); border-radius: 8px; padding: 10px 12px; font-size: 11.5px; line-height: 1.45; }
 .xprinter-tip b { color: var(--ink); }
 
+.direct-print-box {
+  background: #edf7f1; border: 1px solid #cde5d6; border-radius: 8px;
+  padding: 10px 12px; margin-bottom: 12px;
+}
+.dp-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dp-status { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 700; color: var(--green); }
+.dp-status.warn { color: var(--amber); }
+.dp-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 3px rgba(34, 139, 86, 0.16); }
+.dp-actions { display: flex; gap: 6px; }
+.dp-row { margin-top: 8px; }
+.dp-row select {
+  width: 100%; padding: 6px 9px; border-radius: 6px; border: 1px solid #c2dfce;
+  background: #fff; font-size: 12px; font-weight: 600; color: var(--ink); outline: none;
+}
+.dp-row select:focus { border-color: var(--green); }
+.dp-err {
+  background: #fbecec; border: 1px solid #f0c9cd; color: var(--red);
+  border-radius: 7px; padding: 8px 10px; font-size: 11.5px; font-weight: 600; margin-bottom: 10px;
+}
+
 /* ==================== Панели, статистика, таблицы ==================== */
 .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(205px, 1fr)); gap: 14px; margin-bottom: 18px; }
 .stat { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; box-shadow: var(--shadow-sm); }

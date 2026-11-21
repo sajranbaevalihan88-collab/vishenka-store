@@ -100,9 +100,12 @@ export function printBarcodeLabels(items, opts = {}) {
     ? `@page { size: A4; margin: 8mm; }
        body { display: grid; grid-template-columns: repeat(3, 1fr); gap: 3mm; padding: 0; }
        .sticker { border: 0.3mm dashed #bbb; height: ${preset.h}mm; page-break-inside: avoid; }`
-    : `@page { size: ${preset.w}mm ${preset.h}mm; margin: 0; }
+    : `@page { size: ${preset.w}mm ${preset.h}mm; margin: 0 !important; }
+       @media print {
+         html, body { width: ${preset.w}mm; margin: 0 !important; padding: 0 !important; }
+       }
        body { margin: 0; padding: 0; }
-       .sticker { width: ${preset.w}mm; height: ${preset.h}mm; page-break-after: always; break-after: page; }
+       .sticker { width: ${preset.w}mm; height: ${preset.h}mm; page-break-after: always; break-after: page; page-break-inside: avoid; }
        .sticker:last-child { page-break-after: auto; break-after: auto; }`;
 
   const html = `<!doctype html>

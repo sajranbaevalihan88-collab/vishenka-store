@@ -1200,6 +1200,7 @@ function Admin({ data, stats, apiVersion, storeSettings, setStoreSettings, categ
         <LabelPrintModal
           products={labelModalProducts}
           storeSettings={storeSettings}
+          api={api}
           onClose={() => setLabelModalProducts(null)}
           notify={notify}
         />

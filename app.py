@@ -14,6 +14,13 @@ from pydantic import BaseModel
 
 from config import UPLOAD_DIR, DIST_DIR, MAX_PHOTOS, MAX_PHOTO_BYTES, SEED_FILE
 from db import get_conn, init_db, make_ean13, backfill_barcodes
+from tspl_printer import (
+    list_windows_printers,
+    render_label_image,
+    build_tspl_for_label,
+    send_raw_to_printer,
+    calibrate_printer_gap,
+)
 
 app = FastAPI(title="Vishenka Store API")
 
@@ -124,6 +131,32 @@ class StoreSettingsIn(BaseModel):
     receipt_width: str = "58mm"
     auto_print_receipt: bool = False
     sound_enabled: bool = True
+
+
+class DirectLabelItemIn(BaseModel):
+    name: str
+    price: float = 0
+    barcode: str
+    code: str = ""
+    copies: int = 1
+
+
+class DirectPrintLabelsIn(BaseModel):
+    items: list[DirectLabelItemIn]
+    printer_name: str = ""
+    size: str = "58x40"
+    store_name: str = "Vishenka Store"
+    show_store: bool = True
+    show_price: bool = True
+    show_code: bool = True
+    gap_mm: int = 2
+    density: int = 10
+    direction: int = 1
+
+
+class CalibratePrinterIn(BaseModel):
+    printer_name: str = ""
+    size: str = "58x40"
 
 
 # ---------------------------------------------------------------- helpers
@@ -950,6 +983,80 @@ def stats(request: Request, _=Depends(require_auth)):
             "by_payment": {k: round(v, 2) for k, v in by_pay.items()},
         }
     return result
+
+
+# ---------------------------------------------------------------- DIRECT TSPL PRINT (XPRINTER)
+@app.get("/api/printers")
+def get_printers(request: Request, _=Depends(require_auth)):
+    """Список локальных Windows-принтеров для прямой TSPL-печати на Xprinter."""
+    return list_windows_printers()
+
+
+@app.post("/api/print/labels")
+def print_labels_direct(data: DirectPrintLabelsIn, request: Request, _=Depends(require_auth)):
+    """Прямая печать термоэтикеток TSPL на Xprinter XP-365B без диалога браузера и искажений."""
+    info = list_windows_printers()
+    if not info.get("available"):
+        raise HTTPException(400, "Прямая печать на Xprinter доступна только при локальном запуске на Windows")
+    pname = (data.printer_name or "").strip() or info.get("default_printer") or ""
+    if not pname:
+        raise HTTPException(400, "Принтер Xprinter не найден в Windows. Проверьте подключение USB и драйвер.")
+
+    valid_items = [it for it in data.items if int(it.copies or 0) > 0]
+    if not valid_items:
+        raise HTTPException(400, "Нет этикеток для печати")
+
+    chunks: list[bytes] = []
+    total_copies = 0
+    try:
+        for it in valid_items:
+            copies = max(1, min(200, int(it.copies)))
+            img, w_mm, h_mm = render_label_image(
+                name=it.name,
+                price=it.price,
+                barcode=it.barcode,
+                code=it.code,
+                store_name=data.store_name,
+                size=data.size,
+                show_store=data.show_store,
+                show_price=data.show_price,
+                show_code=data.show_code,
+            )
+            chunks.append(
+                build_tspl_for_label(
+                    img,
+                    w_mm,
+                    h_mm,
+                    copies=copies,
+                    gap_mm=max(1, min(6, int(data.gap_mm))),
+                    density=max(1, min(15, int(data.density))),
+                    direction=data.direction,
+                )
+            )
+            total_copies += copies
+        written = send_raw_to_printer(pname, b"".join(chunks), doc_name="Vishenka Store Labels")
+    except ImportError:
+        raise HTTPException(500, "Для прямой печати установите пакет pillow (pip install pillow)")
+    except Exception as exc:
+        raise HTTPException(500, f"Ошибка печати на {pname}: {exc}")
+
+    return {"ok": True, "printer": pname, "labels_printed": total_copies, "bytes": written}
+
+
+@app.post("/api/print/calibrate")
+def calibrate_printer(data: CalibratePrinterIn, request: Request, _=Depends(require_auth)):
+    """Автокалибровка датчика зазора ленты (GAPDETECT) на Xprinter XP-365B."""
+    info = list_windows_printers()
+    if not info.get("available"):
+        raise HTTPException(400, "Калибровка доступна только при локальном запуске на Windows")
+    pname = (data.printer_name or "").strip() or info.get("default_printer") or ""
+    if not pname:
+        raise HTTPException(400, "Принтер Xprinter не найден")
+    try:
+        calibrate_printer_gap(pname, size=data.size)
+    except Exception as exc:
+        raise HTTPException(500, f"Ошибка калибровки {pname}: {exc}")
+    return {"ok": True, "printer": pname}
 
 
 # ---------------------------------------------------------------- STATIC

@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends libpq5 && rm -r
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt uvicorn
 COPY --from=frontend /app/frontend/dist ./frontend/dist
-COPY app.py db.py config.py seed_products.json ./
+COPY app.py db.py config.py tspl_printer.py seed_products.json ./
 ENV PORT=8000
 EXPOSE 8000
 CMD python -m uvicorn app:app --host 0.0.0.0 --port $PORT
